@@ -1,0 +1,8 @@
+{
+  "name": "trex-instance3",
+  "image": "ubuntu:latest",
+  "ipAddress": "192.168.100.21/24",
+  "gateway": "192.168.100.1",
+  "vethHost": "veth-host3",
+  "vethCont": "veth-cont3"
+}

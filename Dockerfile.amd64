@@ -1,0 +1,24 @@
+# Dockerfile for trex-controller
+FROM golang:1.24 AS builder
+
+WORKDIR /trex-controller
+COPY . .
+
+RUN go env -w GOPROXY=https://proxy.golang.org,direct \
+    && go mod tidy
+
+RUN CGO_ENABLED=0 GOOS=linux  go build -o trex-controller /trex-controller/controller
+RUN CGO_ENABLED=0 GOOS=linux  go build -o trexctl /trex-controller/trexctl
+
+# Final image
+FROM alpine:latest
+
+RUN apk --no-cache add iproute2
+WORKDIR /root/
+
+COPY --from=builder /trex-controller/trex-controller .
+COPY --from=builder /trex-controller/trexctl .
+
+RUN chmod +x /root/trex-controller
+
+CMD ["./trex-controller","-log", "/var/log/trex-controller.log"]
