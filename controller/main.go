@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"gopkg.in/yaml.v2"
 	"io"
 	"log"
 	"math/rand"
@@ -164,12 +165,27 @@ func handleRequest(w http.ResponseWriter, r *http.Request, action string) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	// 关闭请求体避免资源泄露
+	defer r.Body.Close()
 
 	var config TRExConfig
-	if err := json.NewDecoder(r.Body).Decode(&config); err != nil {
-		logger.Printf("Error decoding request: %v", err)
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
-		return
+	contentType := r.Header.Get("Content-Type")
+
+	// 根据内容类型选择解码器
+	if strings.Contains(contentType, "application/json") {
+		if err := json.NewDecoder(r.Body).Decode(&config); err != nil {
+			logger.Printf("Error decoding request: %v", err)
+			http.Error(w, "Invalid request body", http.StatusBadRequest)
+			return
+		}
+	}
+
+	if strings.Contains(contentType, "application/yaml") {
+		if err := yaml.NewDecoder(r.Body).Decode(&config); err != nil {
+			logger.Printf("Error decoding request: %v", err)
+			http.Error(w, "Invalid request body", http.StatusBadRequest)
+			return
+		}
 	}
 
 	logger.Printf("Received %s request for container: %s", action, config.Metadata.Name)
