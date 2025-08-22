@@ -240,9 +240,12 @@ func generateTrexVethPair() (string, string) {
 
 func createTRExContainer(config TRExConfig) (string, error) {
 	name := config.Metadata.Name
+	workName := fmt.Sprintf("/%s", name)
+
 	ctx := context.Background()
 	mu.Lock()
 	defer mu.Unlock()
+
 	err := LoadConfig(&config)
 	if err != nil {
 		return "", fmt.Errorf("failed to load config: %v", err)
@@ -258,7 +261,7 @@ func createTRExContainer(config TRExConfig) (string, error) {
 
 	for _, c := range containers {
 		for _, cname := range c.Names {
-			if strings.Contains(cname, name) {
+			if strings.Compare(cname, workName) == 0 {
 				return "", fmt.Errorf("container with name %s already exists", name)
 			}
 		}
