@@ -37,6 +37,7 @@ type Port struct {
 }
 
 type Spec struct {
+	BrName          string `json:"brName" yaml:"brName"`
 	MgmtIP          string `json:"mgmtIP" yaml:"mgmtIP"`
 	MgmtGateway     string `json:"mgmtGateway" yaml:"mgmtGateway"`
 	NetworkType     string `json:"networkType" yaml:"networkType"`
@@ -171,7 +172,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request, action string) {
 		return
 	}
 
-	logger.Printf("Received %s request for container: %s", action, config.Name)
+	logger.Printf("Received %s request for container: %s", action, config.Metadata.Name)
 
 	var result string
 	var err error
@@ -188,14 +189,14 @@ func handleRequest(w http.ResponseWriter, r *http.Request, action string) {
 	}
 
 	if err != nil {
-		logger.Printf("%s failed for %s: %v", action, config.Name, err)
+		logger.Printf("%s failed for %s: %v", action, config.Metadata.Name, err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(result))
-	logger.Printf("%s completed for %s: %s", action, config.Name, result)
+	logger.Printf("%s completed for %s: %s", action, config.Metadata.Name, result)
 }
 
 // 生成trex开头的veth-pair网卡名称对
@@ -226,6 +227,11 @@ func createTRExContainer(config TRExConfig) (string, error) {
 	ctx := context.Background()
 	mu.Lock()
 	defer mu.Unlock()
+	err := LoadConfig(&config)
+	if err != nil {
+		return "", fmt.Errorf("failed to load config: %v", err)
+	}
+
 	logger.Printf("Creating container: %s", name)
 	containers, err := dockerClient.ContainerList(ctx, types.ContainerListOptions{
 		All: true,
@@ -256,6 +262,12 @@ func updateTRExContainer(config TRExConfig) (string, error) {
 	if _, err := deleteTRExContainer(config); err != nil {
 		return "", err
 	}
+
+	err := LoadConfig(&config)
+	if err != nil {
+		return "", fmt.Errorf("failed to load config: %v", err)
+	}
+
 	return createTRExContainer(config)
 }
 

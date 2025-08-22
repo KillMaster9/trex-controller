@@ -90,3 +90,41 @@ func generateRandomIPWithGateway() (string, string, error) {
 
 	return privateIP.String(), gatewayIP.String(), nil
 }
+
+const brName = "trex-br0"
+
+func LoadConfig(trexConfig *TRExConfig) error {
+	if trexConfig == nil {
+		return fmt.Errorf("trexConfig is nil, please configure trexConfig")
+	}
+
+	if trexConfig.Metadata.Name == "" {
+		return fmt.Errorf("trexConfig.Metadata.Name is empty, please configure trexConfig.Metadata.Name")
+	}
+
+	if trexConfig.Metadata.Image == "" {
+		return fmt.Errorf("trexConfig.Metadata.Image is empty, please configure trexConfig.Metadata.Image")
+	}
+
+	if trexConfig.Spec.MgmtIP == "" {
+		return fmt.Errorf("trexConfig.Spec.MgmtIP is empty, please configure trexConfig.Spec.MgmtIP")
+	}
+
+	if trexConfig.Spec.MgmtGateway == "" {
+		return fmt.Errorf("trexConfig.Spec.MgmtGateway is empty, please configure trexConfig.Spec.MgmtGateway")
+	}
+
+	if len(trexConfig.Spec.Port) == 0 {
+		return fmt.Errorf("trexConfig.Spec.Port is empty, please configure trexConfig.Spec.Port")
+	}
+
+	if trexConfig.Spec.NetworkType == "" {
+		trexConfig.Spec.NetworkType = "SRIOV"
+	}
+
+	if trexConfig.Spec.BrName == "" {
+		trexConfig.Spec.BrName = brName
+	}
+
+	return nil
+}

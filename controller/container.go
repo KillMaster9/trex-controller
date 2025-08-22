@@ -155,13 +155,13 @@ type deploymentState struct {
 }
 
 const pauseImage = "k8s.gcr.io/pause:3.8" // 官方轻量级pause容器
-const brName = "trex-br0"
 
 func CreateTRExContainer(ctx context.Context, config TRExConfig) (string, error) {
 	state := &deploymentState{
 		pauseContainerID:  "",
 		workerContainerID: "",
 	}
+	bridgeName := config.Spec.BrName
 	var err error
 
 	defer func() {
@@ -179,7 +179,7 @@ func CreateTRExContainer(ctx context.Context, config TRExConfig) (string, error)
 	}
 
 	// 2. 确保网桥存在
-	br, err := EnsureBridge(brName, 1500, false, false)
+	br, err := EnsureBridge(bridgeName, 1500, false, false)
 	if err != nil {
 		return "", fmt.Errorf("failed to ensure bridge: %v", err)
 	}
