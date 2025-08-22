@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"github.com/containernetworking/plugins/pkg/ns"
 	"github.com/vishvananda/netlink"
+	"log"
 	"net"
 	"os"
 	"path/filepath"
@@ -68,8 +69,10 @@ func EnsureBridge(brName string, mtu int, promiscMode, vlanFiltering bool) (*net
 }
 
 func getPairName(name, pauseID string) (string, string) {
-	id := fmt.Sprintf("%s_%s", name, pauseID[:3])
-	return fmt.Sprintf("trex_%s", id), fmt.Sprintf("tmp%s", id)
+	if len(name) > 10 {
+		name = name[:9]
+	}
+	return fmt.Sprintf("trex_%s", name), fmt.Sprintf("tmp%s", name)
 }
 
 func configurePauseContainerNetwork(config TRExConfig, pid int, br *netlink.Bridge, pauseID string) (map[string]string, error) {
@@ -123,6 +126,9 @@ func configurePauseContainerNetwork(config TRExConfig, pid int, br *netlink.Brid
 		}
 
 		// 添加IP地址
+		if !strings.Contains(config.Spec.MgmtIP, "/") {
+			config.Spec.MgmtIP = fmt.Sprintf("%s/32", config.Spec.MgmtIP)
+		}
 		addr, err := netlink.ParseAddr(config.Spec.MgmtIP)
 		if err != nil {
 			return fmt.Errorf("failed to parse IP address: %v", err)
@@ -137,6 +143,10 @@ func configurePauseContainerNetwork(config TRExConfig, pid int, br *netlink.Brid
 			Gw:  net.ParseIP(config.Spec.MgmtGateway),
 		}
 		if err := netlink.RouteAdd(&route); err != nil && err != syscall.EEXIST {
+			if err == syscall.ENETUNREACH {
+				log.Printf("Warning: Network unreachable when adding default route, continuing anyway")
+				return nil
+			}
 			return fmt.Errorf("failed to add default route: %v", err)
 		}
 
