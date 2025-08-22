@@ -30,16 +30,18 @@ type Metadata struct {
 }
 type Port struct {
 	IFName  string `json:"ifName" yaml:"ifName"`
+	VFIndex int    `json:"vfIndex" yaml:"vfIndex"`
 	IP      string `json:"ip" yaml:"ip"`
 	Gateway string `json:"gateway" yaml:"gateway"`
-	Vlan    int    `json:"vlan" yaml:"vlan"`
+	VlanId  int    `json:"vlanId" yaml:"vlanId"`
 }
 
 type Spec struct {
-	MgmtIP      string `json:"mgmtIP" yaml:"mgmtIP"`
-	MgmtGateway string `json:"mgmtGateway" yaml:"mgmtGateway"`
-	NetworkType string `json:"networkType" yaml:"networkType"`
-	Port        []Port `json:"port" yaml:"port"`
+	MgmtIP          string `json:"mgmtIP" yaml:"mgmtIP"`
+	MgmtGateway     string `json:"mgmtGateway" yaml:"mgmtGateway"`
+	NetworkType     string `json:"networkType" yaml:"networkType"`
+	ParentInterface string `json:"parantInterface" yaml:"parantInterface"`
+	Port            []Port `json:"port" yaml:"port"`
 }
 
 // TRExConfig 定义TREx容器的配置
@@ -318,7 +320,7 @@ func deleteTRExContainer(config TRExConfig) (string, error) {
 		return "", fmt.Errorf("failed to remove container: %v", err)
 	}
 
-	vethHost, vethCont := getPairName(pauseID)
+	vethHost, vethCont := getPairName(config.Metadata.Name, pauseID)
 	logger.Printf("Deleting veth pair: %s <-> %s", vethHost, vethCont)
 	// 删除veth pair
 	if err := deleteVethPair(vethHost); err != nil {

@@ -6,6 +6,8 @@ import (
 	"github.com/vishvananda/netlink"
 	"net"
 	"os"
+	"path/filepath"
+	"strings"
 	"syscall"
 )
 
@@ -65,40 +67,47 @@ func EnsureBridge(brName string, mtu int, promiscMode, vlanFiltering bool) (*net
 	return br, nil
 }
 
-func getPairName(pauseID string) (string, string) {
-	id := pauseID[:7]
-	return fmt.Sprintf("trex%s", id), fmt.Sprintf("tmp%s", id)
+func getPairName(name, pauseID string) (string, string) {
+	id := fmt.Sprintf("%s_%s", name, pauseID[:3])
+	return fmt.Sprintf("trex_%s", id), fmt.Sprintf("tmp%s", id)
 }
 
-func configurePauseContainerNetwork(config TRExConfig, pid int, br *netlink.Bridge, pauseID string) error {
+func configurePauseContainerNetwork(config TRExConfig, pid int, br *netlink.Bridge, pauseID string) (map[string]string, error) {
 	// 使用网络命名空间文件路径
-	vethHost, vethCont := getPairName(pauseID)
+	vethHost, vethCont := getPairName(config.Metadata.Name, pauseID)
 
 	// 创建veth pair
 	hostVeth, contVeth, err := createVethPair(vethHost, vethCont, 1500)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	// 将host端veth连接到网桥
 	if err := netlink.LinkSetMaster(hostVeth, br); err != nil {
-		return fmt.Errorf("failed to connect veth to bridge: %v", err)
+		return nil, fmt.Errorf("failed to connect veth to bridge: %v", err)
 	}
 
 	// 启用host端veth
 	if err := netlink.LinkSetUp(hostVeth); err != nil {
-		return fmt.Errorf("failed to set host veth up: %v", err)
+		return nil, fmt.Errorf("failed to set host veth up: %v", err)
 	}
 	netnsPath := fmt.Sprintf("/proc/%d/ns/net", pid)
 	if err := netlink.LinkSetNsFd(contVeth, int(netnsPathFD(netnsPath))); err != nil {
-		return fmt.Errorf("failed to move veth to container: %v", err)
+		return nil, fmt.Errorf("failed to move veth to container: %v", err)
 	}
 
+	vfPCIMap := make(map[string]string)
+
 	// 配置VF vlanID
-	// Todo ...
+	if config.Spec.NetworkType == "SRIOV" {
+		vfPCIMap, err = configVFNetwork(config)
+		if err != nil {
+			return nil, err
+		}
+	}
 
 	// 进入网络命名空间配置
-	return ns.WithNetNSPath(netnsPath, func(_ ns.NetNS) error {
+	return vfPCIMap, ns.WithNetNSPath(netnsPath, func(_ ns.NetNS) error {
 		// 重命名容器端veth
 		if err := netlink.LinkSetName(contVeth, "mgmt"); err != nil {
 			return fmt.Errorf("failed to rename container veth: %v", err)
@@ -178,7 +187,102 @@ func netnsPathFD(netnsPath string) uintptr {
 	return file.Fd()
 }
 
-func configVFNetwork(config TRExConfig) error {
+func configVFNetwork(config TRExConfig) (map[string]string, error) {
+	parentIfName := config.Spec.ParentInterface
+	vfPCIMap := make(map[string]string)
+
+	for _, port := range config.Spec.Port {
+		portIndex := string(port.VFIndex)
+		logger.Println(fmt.Sprintf("Configure VF %s Network", portIndex))
+		vfName := fmt.Sprintf("%sv%s", parentIfName, portIndex)
+		vfPciAddress, err := getVFPciAddress(parentIfName, vfName)
+		if err != nil {
+			return nil, err
+		}
+		vfPCIMap[vfName] = vfPciAddress
+
+		if err = setVFVlan(parentIfName, vfName, port.VlanId); err != nil && err != syscall.EEXIST {
+			return nil, err
+		}
+	}
+
+	return vfPCIMap, nil
+}
+
+// getVFPciAddress 通过父接口名和VF名获取VF的PCI地址
+func getVFPciAddress(parentIfName, vfName string) (string, error) {
+	// 获取VF网络接口
+	vfLink, err := netlink.LinkByName(vfName)
+	if err != nil {
+		return "", fmt.Errorf("failed to get VF link: %v", err)
+	}
+
+	// 获取父接口
+	parentLink, err := netlink.LinkByName(parentIfName)
+	if err != nil {
+		return "", fmt.Errorf("failed to get parent link: %v", err)
+	}
+
+	// 检查父接口是否是SR-IOV支持的设备
+	if parentLink.Type() != "device" {
+		return "", fmt.Errorf("parent interface is not a physical device")
+	}
+
+	// 获取VF的索引
+	vfIndex := vfLink.Attrs().Index
+
+	// 通过sysfs查找VF的PCI地址
+	pciAddress, err := findVFPciAddress(parentIfName, vfIndex)
+	if err != nil {
+		return "", fmt.Errorf("failed to find VF PCI address: %v", err)
+	}
+
+	logger.Println(fmt.Sprintf("VF %s PCI Address: %s", vfName, pciAddress))
+
+	return pciAddress, nil
+}
+
+// findVFPciAddress 通过sysfs查找VF的PCI地址
+func findVFPciAddress(parentIfName string, vfIndex int) (string, error) {
+	// 构建sysfs路径
+	sysfsPath := fmt.Sprintf("/sys/class/net/%s/device/virtfn%d", parentIfName, vfIndex)
+
+	// 解析PCI地址的符号链接
+	pciPath, err := filepath.EvalSymlinks(sysfsPath)
+	if err != nil {
+		return "", err
+	}
+
+	// 从路径中提取PCI地址
+	pciAddress := filepath.Base(pciPath)
+	if !strings.HasPrefix(pciAddress, "0000:") {
+		pciAddress = "0000:" + pciAddress
+	}
+
+	return pciAddress, nil
+}
+
+// setVFVlan 设置VF的VLAN ID
+func setVFVlan(parentIfName, vfName string, vlanID int) error {
+	// 获取父接口
+	parentLink, err := netlink.LinkByName(parentIfName)
+	if err != nil {
+		return fmt.Errorf("failed to get parent link: %v", err)
+	}
+
+	// 获取VF网络接口
+	vfLink, err := netlink.LinkByName(vfName)
+	if err != nil {
+		return fmt.Errorf("failed to get VF link: %v", err)
+	}
+
+	// 获取VF索引
+	vfIndex := vfLink.Attrs().Index
+
+	// 设置VF的VLAN
+	if err := netlink.LinkSetVfVlan(parentLink, vfIndex, vlanID); err != nil {
+		return fmt.Errorf("failed to set VF VLAN: %v", err)
+	}
 
 	return nil
 }

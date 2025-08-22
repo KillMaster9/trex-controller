@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/mount"
+	"github.com/docker/docker/api/types/strslice"
 	"github.com/docker/docker/client"
 	"github.com/vishvananda/netlink"
 	"os"
@@ -52,21 +54,47 @@ func createAndStartPauseContainer(ctx context.Context, config TRExConfig) (strin
 	return pauseID, pid, nil
 }
 
-func createWorkerContainer(ctx context.Context, config TRExConfig, pauseContainerID string) (string, error) {
+func createWorkerContainer(ctx context.Context, config TRExConfig, pauseContainerID string, vfPCIMap map[string]string) (string, error) {
+	image := config.Metadata.Image
+	name := config.Metadata.Name
+	// 生成配置文件
+	configFilePath, err := createVFConfigFile(name, vfPCIMap)
+	if err != nil {
+		return "", fmt.Errorf("failed to create VF config file: %v", err)
+	}
+
 	// 创建工作容器配置
 	containerConfig := &container.Config{
-		Image: config.Image,
+		Image: image,
 		Cmd:   []string{"tail", "-f", "/dev/null"}, // 保持容器运行
 		Tty:   true,
+	}
+
+	mounts := []mount.Mount{
+		{
+			Type:   mount.TypeBind,
+			Source: "/mnt/huge",
+			Target: "/mnt/huge",
+		},
+		{
+			Type:   mount.TypeBind,
+			Source: configFilePath,
+			Target: "/etc/trex_cfg.yaml",
+		},
 	}
 
 	hostConfig := &container.HostConfig{
 		// 共享pause容器的网络命名空间
 		NetworkMode: container.NetworkMode("container:" + pauseContainerID),
-		CapAdd:      []string{"NET_ADMIN"},
+		// 添加所有能力
+		CapAdd: strslice.StrSlice{"ALL"},
+		// 启用特权模式
+		Privileged: true,
+		// 设置挂载点
+		Mounts: mounts,
 	}
 
-	resp, err := dockerClient.ContainerCreate(ctx, containerConfig, hostConfig, nil, nil, config.Name)
+	resp, err := dockerClient.ContainerCreate(ctx, containerConfig, hostConfig, nil, nil, config.Metadata.Name)
 	if err != nil {
 		return "", fmt.Errorf("failed to create worker container: %v", err)
 	}
@@ -95,10 +123,14 @@ func cleanupOnError(ctx context.Context, state *deploymentState, config TRExConf
 
 	// 清理网络配置
 	if state.networkConfigured {
-		hostName, _ := getPairName(state.pauseContainerID)
+		hostName, _ := getPairName(config.Metadata.Name, state.pauseContainerID)
 		logger.Printf("Cleaning up network interfaces")
 		if link, err := netlink.LinkByName(hostName); err == nil {
 			netlink.LinkDel(link)
+		}
+
+		if config.Spec.NetworkType == "SRIOV" {
+			// Todo...
 		}
 	}
 
@@ -162,13 +194,14 @@ func CreateTRExContainer(ctx context.Context, config TRExConfig) (string, error)
 	state.pausePID = pid
 
 	// 4. 配置pause容器的网络
-	if err := configurePauseContainerNetwork(config, pid, br, pauseID); err != nil {
+	vfPCIMap, err := configurePauseContainerNetwork(config, pid, br, pauseID)
+	if err != nil {
 		return "", fmt.Errorf("failed to configure pause container network: %v", err)
 	}
 	state.networkConfigured = true
 
 	// 5. 创建工作容器（共享pause容器的网络命名空间）
-	workerID, err := createWorkerContainer(ctx, config, pauseID)
+	workerID, err := createWorkerContainer(ctx, config, pauseID, vfPCIMap)
 	if err != nil {
 		return "", fmt.Errorf("failed to create worker container: %v", err)
 	}
