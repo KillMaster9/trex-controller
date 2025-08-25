@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -25,7 +26,7 @@ type TrexConfigFile struct {
 	TrexPortConfig []TrexPortConfig
 }
 
-func createVFConfigFile(name string, vfPCIMap map[string]string) (string, error) {
+func createVFConfigFile(name string, vfPCIMap map[string]string, config TRExConfig) (string, error) {
 	// 转换映射格式
 	trexPortConfig := TrexPortConfig{
 		PortLimit:  len(vfPCIMap) * 2,
@@ -37,19 +38,55 @@ func createVFConfigFile(name string, vfPCIMap map[string]string) (string, error)
 		}, len(vfPCIMap)*2),
 	}
 
-	for _, pciAddr := range vfPCIMap {
-		pcis := []string{pciAddr, "dummy"}
-		trexPortConfig.Interfaces = append(trexPortConfig.Interfaces, pcis...)
-		ip, gateway, _ := generateRandomIPWithGateway()
+	pName := config.Spec.ParentInterface
+	for i, port := range config.Spec.Port {
+		vfName := fmt.Sprintf("%sv%d", pName, port.VFIndex)
+		if pci, ok := vfPCIMap[vfName]; ok {
+			trexPortConfig.Interfaces = append(trexPortConfig.Interfaces, pci, "dummy")
+		} else {
+			return "", fmt.Errorf("failed to find VF PCI address for %s", vfName)
+		}
+
+		var ip string
+		var gateway string
+
+		if port.IP != "" && port.Gateway != "" {
+			ip = port.IP
+			gateway = port.Gateway
+		} else {
+			ip, gateway = generateRandomIPWithGateway(i)
+		}
+
 		trexPortConfig.PortInfo = append(trexPortConfig.PortInfo, struct {
 			ip             string `yaml:"ip"`
 			defaultGateway string `yaml:"default_gateway"`
 		}{ip, gateway})
+
+		// this for dummy port
+		tmpIP := strings.Split(ip, "/")[0]
+		excludeIP := []net.IP{net.ParseIP(tmpIP), net.ParseIP(gateway)}
+		dummyIP, _ := generateRandomIP(ip, excludeIP)
+		trexPortConfig.PortInfo = append(trexPortConfig.PortInfo, struct {
+			ip             string `yaml:"ip"`
+			defaultGateway string `yaml:"default_gateway"`
+		}{dummyIP.String(), gateway})
 	}
+
+	//for vfName, pciAddr := range vfPCIMap {
+	//	pcis := []string{pciAddr, "dummy"}
+	//	trexPortConfig.Interfaces = append(trexPortConfig.Interfaces, pcis...)
+	//	ip, gateway, _ := generateRandomIPWithGateway()
+	//	trexPortConfig.PortInfo = append(trexPortConfig.PortInfo, struct {
+	//		ip             string `yaml:"ip"`
+	//		defaultGateway string `yaml:"default_gateway"`
+	//	}{ip, gateway})
+	//}
 
 	vfConfigs := TrexConfigFile{
 		TrexPortConfig: []TrexPortConfig{trexPortConfig},
 	}
+
+	logger.Println("Create trex_cfg.yaml for %s:%v", name, trexPortConfig)
 
 	// 转换为YAML格式
 	yamlData, err := yaml.Marshal(vfConfigs)
@@ -72,23 +109,58 @@ func createVFConfigFile(name string, vfPCIMap map[string]string) (string, error)
 }
 
 // generateRandomIPWithGateway 随机生成一个IP地址和对应的网关
-func generateRandomIPWithGateway() (string, string, error) {
+func generateRandomIPWithGateway(i int) (string, string) {
 	// 设置随机种子
-	rand.Seed(time.Now().UnixNano())
+	return fmt.Sprintf("192.168.%d.%d/24", i, 10+i), fmt.Sprintf("192.168.%d.1", i)
+}
 
-	// 生成一个随机的私有IP地址段 (192.168.x.x/16)
-	// 这里使用192.168.0.0/16网段作为示例
-	privateIP := net.IPv4(192, 168, byte(rand.Intn(255)), byte(rand.Intn(254)+1))
-
-	// 确保IP地址不为网络地址(.0)或广播地址(.255)
-	for privateIP[3] == 0 || privateIP[3] == 255 {
-		privateIP = net.IPv4(192, 168, byte(rand.Intn(255)), byte(rand.Intn(254)+1))
+func generateRandomIP(cidr string, excludeIP []net.IP) (net.IP, error) {
+	// 解析CIDR
+	_, ipNet, err := net.ParseCIDR(cidr)
+	if err != nil {
+		return nil, err
 	}
 
-	// 计算网关地址，通常为该网段的第一个可用地址(x.x.x.1)
-	gatewayIP := net.IPv4(privateIP[0], privateIP[1], privateIP[2], 1)
+	// 将IP转换为4字节格式
 
-	return privateIP.String(), gatewayIP.String(), nil
+	// 计算网络大小
+	ones, bits := ipNet.Mask.Size()
+	totalIPs := 1 << (bits - ones)
+	if totalIPs <= 1 {
+		return nil, fmt.Errorf("network too small to generate random IP")
+	}
+
+	// 初始化随机数生成器
+	rand.New(rand.NewSource(time.Now().UnixNano()))
+
+	// 生成随机IP
+	for {
+		// 随机生成一个主机地址
+		randomHost := rand.Uint32() % uint32(totalIPs)
+		ip := make(net.IP, 4)
+		ip[0] = ipNet.IP[0] + byte(randomHost>>24)
+		ip[1] = ipNet.IP[1] + byte(randomHost>>16)
+		ip[2] = ipNet.IP[2] + byte(randomHost>>8)
+		ip[3] = ipNet.IP[3] + byte(randomHost)
+
+		// 跳过网络地址和广播地址
+		if randomHost == 0 || randomHost == uint32(totalIPs-1) {
+			continue
+		}
+
+		// 跳过排除的IP
+		for _, eIP := range excludeIP {
+			eIP = eIP.To4()
+			if eIP == nil {
+				return nil, fmt.Errorf("excludeIP is not a valid IPv4 address")
+			}
+			if ip.Equal(eIP) {
+				continue
+			}
+		}
+
+		return ip, nil
+	}
 }
 
 const brName = "trex-br0"

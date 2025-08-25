@@ -54,12 +54,22 @@ type TRExConfig struct {
 }
 
 var (
-	dockerClient *client.Client
-	mu           sync.Mutex // 用于同步网络操作
-	server       *http.Server
-	logger       *log.Logger
-	logFile      *os.File
+	dockerClient   *client.Client
+	mu             sync.Mutex // 用于同步网络操作
+	server         *http.Server
+	logger         *log.Logger
+	logFile        *os.File
+	containerLocks ContainerLockManager
 )
+
+type ContainerLockManager struct {
+	locks sync.Map // 存储容器名称对应的互斥锁
+}
+
+func (clm *ContainerLockManager) GetLock(containerName string) *sync.Mutex {
+	lock, _ := clm.locks.LoadOrStore(containerName, &sync.Mutex{})
+	return lock.(*sync.Mutex)
+}
 
 // 命令行参数
 var (
@@ -243,8 +253,9 @@ func createTRExContainer(config TRExConfig) (string, error) {
 	workName := fmt.Sprintf("/%s", name)
 
 	ctx := context.Background()
-	mu.Lock()
-	defer mu.Unlock()
+	lock := containerLocks.GetLock(name)
+	lock.Lock()
+	defer lock.Unlock()
 
 	err := LoadConfig(&config)
 	if err != nil {
@@ -291,9 +302,11 @@ func updateTRExContainer(config TRExConfig) (string, error) {
 }
 
 func deleteTRExContainer(config TRExConfig) (string, error) {
-	mu.Lock()
-	defer mu.Unlock()
 	name := config.Metadata.Name
+
+	lock := containerLocks.GetLock(name)
+	lock.Lock()
+	defer lock.Unlock()
 
 	pauseName := fmt.Sprintf("/%s-pause", name)
 	workName := fmt.Sprintf("/%s", name)
@@ -329,33 +342,42 @@ func deleteTRExContainer(config TRExConfig) (string, error) {
 		return fmt.Sprintf("Container %s not exist", pauseName), nil
 	}
 
-	logger.Printf("Stopping container: %s (ID: %s)", name, containerID)
-	// 停止容器
-	if err := dockerClient.ContainerStop(ctx, containerID, container.StopOptions{}); err != nil {
-		logger.Printf("Warning: failed to stop container %s: %v", containerID, err)
+	if containerID != "" {
+		logger.Printf("Stopping container: %s (ID: %s)", name, containerID)
+		// 停止容器
+		if err := dockerClient.ContainerStop(ctx, containerID, container.StopOptions{}); err != nil {
+			logger.Printf("Warning: failed to stop container %s: %v", containerID, err)
+		}
+
+		logger.Printf("Removing container: %s (ID: %s)", name, containerID)
+		// 删除容器
+		if err := dockerClient.ContainerRemove(ctx, containerID, types.ContainerRemoveOptions{
+			Force: true,
+		}); err != nil {
+			return "", fmt.Errorf("failed to remove container: %v", err)
+		}
 	}
 
-	logger.Printf("Removing container: %s (ID: %s)", name, containerID)
-	// 删除容器
-	if err := dockerClient.ContainerRemove(ctx, containerID, types.ContainerRemoveOptions{
-		Force: true,
-	}); err != nil {
-		return "", fmt.Errorf("failed to remove container: %v", err)
+	if pauseID != "" {
+		//删除Pause容器
+		logger.Printf("Stopping pause container: %s (ID: %s)", pauseName, pauseID)
+		if err := dockerClient.ContainerRemove(ctx, pauseID, types.ContainerRemoveOptions{
+			Force: true,
+		}); err != nil {
+			return "", fmt.Errorf("failed to remove container: %v", err)
+		}
+
+		vethHost, vethCont := getPairName(config.Metadata.Name, pauseID)
+		logger.Printf("Deleting veth pair: %s <-> %s", vethHost, vethCont)
+		// 删除veth pair
+		if err := deleteVethPair(vethHost); err != nil {
+			logger.Printf("Warning: failed to delete veth pair: %v", err)
+		}
 	}
 
-	//删除Pause容器
-	logger.Printf("Stopping pause container: %s (ID: %s)", pauseName, pauseID)
-	if err := dockerClient.ContainerRemove(ctx, pauseID, types.ContainerRemoveOptions{
-		Force: true,
-	}); err != nil {
-		return "", fmt.Errorf("failed to remove container: %v", err)
-	}
-
-	vethHost, vethCont := getPairName(config.Metadata.Name, pauseID)
-	logger.Printf("Deleting veth pair: %s <-> %s", vethHost, vethCont)
-	// 删除veth pair
-	if err := deleteVethPair(vethHost); err != nil {
-		logger.Printf("Warning: failed to delete veth pair: %v", err)
+	configFile := fmt.Sprintf("/tmp/trex/%s_trex_cfg.yaml", config.Metadata.Name)
+	if err := os.Remove(configFile); err != nil && !os.IsNotExist(err) {
+		logger.Printf("Warning: failed to delete config file %s: %v", configFile, err)
 	}
 
 	return fmt.Sprintf("Container %s deleted", name), nil

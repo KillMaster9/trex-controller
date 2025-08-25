@@ -57,12 +57,14 @@ func createAndStartPauseContainer(ctx context.Context, config TRExConfig) (strin
 func createWorkerContainer(ctx context.Context, config TRExConfig, pauseContainerID string, vfPCIMap map[string]string) (string, error) {
 	image := config.Metadata.Image
 	name := config.Metadata.Name
+	logger.Printf("Creating worker container for %s ...", name, "vfPCIMap is %v", vfPCIMap)
 	// 生成配置文件
-	configFilePath, err := createVFConfigFile(name, vfPCIMap)
+	configFilePath, err := createVFConfigFile(name, vfPCIMap, config)
 	if err != nil {
 		return "", fmt.Errorf("failed to create VF config file: %v", err)
 	}
 
+	logger.Printf("Generated VF config file: %s Success! ", configFilePath)
 	// 创建工作容器配置
 	containerConfig := &container.Config{
 		Image: image,
@@ -94,6 +96,7 @@ func createWorkerContainer(ctx context.Context, config TRExConfig, pauseContaine
 		Mounts: mounts,
 	}
 
+	logger.Printf("Creating worker container %s with config: %+v", config.Metadata.Name, containerConfig)
 	resp, err := dockerClient.ContainerCreate(ctx, containerConfig, hostConfig, nil, nil, config.Metadata.Name)
 	if err != nil {
 		return "", fmt.Errorf("failed to create worker container: %v", err)
@@ -101,6 +104,7 @@ func createWorkerContainer(ctx context.Context, config TRExConfig, pauseContaine
 	workerID := resp.ID
 
 	// 启动工作容器
+	logger.Printf("Starting worker container %s", config.Metadata.Name)
 	if err := dockerClient.ContainerStart(ctx, workerID, types.ContainerStartOptions{}); err != nil {
 		return "", fmt.Errorf("failed to start worker container: %v", err)
 	}

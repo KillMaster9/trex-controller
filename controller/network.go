@@ -214,7 +214,8 @@ func configVFNetwork(config TRExConfig) (map[string]string, error) {
 		}
 		vfPCIMap[vfName] = vfPciAddress
 
-		if err = setVFVlan(parentIfName, vfName, port.VlanId); err != nil && err != syscall.EEXIST {
+		if err = setVFVlan(parentIfName, port.VFIndex, port.VlanId); err != nil && err != syscall.EEXIST {
+			logger.Println(fmt.Sprintf("Warning: Failed to set VF VLAN ID: %v", err))
 			return nil, err
 		}
 	}
@@ -333,28 +334,28 @@ func extractPCIFromUevent(ueventPath string) (string, error) {
 }
 
 // setVFVlan 设置VF的VLAN ID
-func setVFVlan(parentIfName, vfName string, vlanID int) error {
+func setVFVlan(parentIfName string, vfIndex int, vlanID int) error {
 	// 获取父接口
 	parentLink, err := netlink.LinkByName(parentIfName)
 	if err != nil {
 		return fmt.Errorf("failed to get parent link: %v", err)
 	}
 
-	// 获取VF网络接口
-	vfLink, err := netlink.LinkByName(vfName)
-	if err != nil {
-		return fmt.Errorf("failed to get VF link: %v", err)
-	}
-
-	// 获取VF索引
-	vfIndex := vfLink.Attrs().Index
+	//// 获取VF网络接口
+	//vfLink, err := netlink.LinkByName(vfName)
+	//if err != nil {
+	//	return fmt.Errorf("failed to get VF link: %v", err)
+	//}
+	//
+	//// 获取VF索引
+	//vfIndex := vfLink.Attrs().Index
 
 	// 设置VF的VLAN
 	if err := netlink.LinkSetVfVlan(parentLink, vfIndex, vlanID); err != nil {
 		return fmt.Errorf("failed to set VF VLAN: %v", err)
 	}
 
-	logger.Println(fmt.Sprintf("Set VF %s VLAN ID: %d", vfName, vlanID))
+	logger.Println(fmt.Sprintf("Set VF %s VLAN ID: %d Success!", fmt.Sprintf("%sv%d", parentIfName, vfIndex), vlanID))
 
 	return nil
 }
