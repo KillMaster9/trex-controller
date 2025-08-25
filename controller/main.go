@@ -42,7 +42,7 @@ type Spec struct {
 	MgmtIP          string `json:"mgmtIP" yaml:"mgmtIP"`
 	MgmtGateway     string `json:"mgmtGateway" yaml:"mgmtGateway"`
 	NetworkType     string `json:"networkType" yaml:"networkType"`
-	ParentInterface string `json:"parantInterface" yaml:"parantInterface"`
+	ParentInterface string `json:"parentInterface" yaml:"parentInterface"`
 	Port            []Port `json:"port" yaml:"port"`
 }
 

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"github.com/containernetworking/plugins/pkg/ns"
 	"github.com/vishvananda/netlink"
@@ -8,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 )
@@ -202,9 +204,10 @@ func configVFNetwork(config TRExConfig) (map[string]string, error) {
 	vfPCIMap := make(map[string]string)
 
 	for _, port := range config.Spec.Port {
-		portIndex := string(port.VFIndex)
-		logger.Println(fmt.Sprintf("Configure VF %s Network", portIndex))
+		portIndex := strconv.Itoa(port.VFIndex)
+		//logger.Println(fmt.Sprintf("Configure VF %s Network", portIndex))
 		vfName := fmt.Sprintf("%sv%s", parentIfName, portIndex)
+		logger.Println(fmt.Sprintf("Configure VF %s Network", vfName))
 		vfPciAddress, err := getVFPciAddress(parentIfName, vfName)
 		if err != nil {
 			return nil, err
@@ -222,7 +225,7 @@ func configVFNetwork(config TRExConfig) (map[string]string, error) {
 // getVFPciAddress 通过父接口名和VF名获取VF的PCI地址
 func getVFPciAddress(parentIfName, vfName string) (string, error) {
 	// 获取VF网络接口
-	vfLink, err := netlink.LinkByName(vfName)
+	_, err := netlink.LinkByName(vfName)
 	if err != nil {
 		return "", fmt.Errorf("failed to get VF link: %v", err)
 	}
@@ -239,10 +242,10 @@ func getVFPciAddress(parentIfName, vfName string) (string, error) {
 	}
 
 	// 获取VF的索引
-	vfIndex := vfLink.Attrs().Index
+	//vfIndex := vfLink.Attrs().Index
 
 	// 通过sysfs查找VF的PCI地址
-	pciAddress, err := findVFPciAddress(parentIfName, vfIndex)
+	pciAddress, err := findVFPciAddress(parentIfName, vfName)
 	if err != nil {
 		return "", fmt.Errorf("failed to find VF PCI address: %v", err)
 	}
@@ -253,23 +256,80 @@ func getVFPciAddress(parentIfName, vfName string) (string, error) {
 }
 
 // findVFPciAddress 通过sysfs查找VF的PCI地址
-func findVFPciAddress(parentIfName string, vfIndex int) (string, error) {
+func findVFPciAddress(parentIfName string, vfName string) (string, error) {
 	// 构建sysfs路径
-	sysfsPath := fmt.Sprintf("/sys/class/net/%s/device/virtfn%d", parentIfName, vfIndex)
+	//vfName := fmt.Sprintf("%sv%d", parentIfName, vfIndex)
 
-	// 解析PCI地址的符号链接
-	pciPath, err := filepath.EvalSymlinks(sysfsPath)
+	ifacePath := filepath.Join("/sys/class/net", vfName)
+	if _, err := os.Stat(ifacePath); os.IsNotExist(err) {
+		logger.Println(fmt.Sprintf("VF %s not exist", vfName))
+
+		return "", fmt.Errorf("VF %s not exist", vfName)
+	}
+
+	// 获取设备符号链接
+	devicePath := filepath.Join(ifacePath, "device")
+	deviceSymlink, err := filepath.EvalSymlinks(devicePath)
+	if err != nil {
+		return "", fmt.Errorf("unable to resolve device symbolic link: %v", err)
+	}
+
+	// 从设备路径中提取PCI地址
+	pciAddr := extractPCIAddress(deviceSymlink)
+	if pciAddr == "" {
+		// 备用方法：尝试从uevent文件读取
+		ueventPath := filepath.Join(devicePath, "uevent")
+		pciAddr, err = extractPCIFromUevent(ueventPath)
+		if err != nil {
+			return "", fmt.Errorf("unable to extract PCI address from uevent file: %v", err)
+		}
+	}
+
+	if pciAddr == "" {
+		return "", fmt.Errorf("unable to determine PCI address for network interface %s", vfName)
+	}
+
+	return pciAddr, nil
+}
+func extractPCIAddress(devicePath string) string {
+	// 设备路径通常包含PCI地址作为最后一部分
+	// 例如: /sys/devices/pci0000:00/0000:00:02.0/0000:01:00.0/net/eth1
+	parts := strings.Split(devicePath, "/")
+	for i := len(parts) - 1; i >= 0; i-- {
+		part := parts[i]
+		// PCI地址格式: [domain:]bus:device.function
+		if strings.Contains(part, ":") && strings.Contains(part, ".") {
+			return part
+		}
+	}
+	return ""
+}
+
+// extractPCIFromUevent 从uevent文件中提取PCI地址
+func extractPCIFromUevent(ueventPath string) (string, error) {
+	file, err := os.Open(ueventPath)
 	if err != nil {
 		return "", err
 	}
+	defer file.Close()
 
-	// 从路径中提取PCI地址
-	pciAddress := filepath.Base(pciPath)
-	if !strings.HasPrefix(pciAddress, "0000:") {
-		pciAddress = "0000:" + pciAddress
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "PCI_SLOT_NAME=") {
+			// 格式: PCI_SLOT_NAME=0000:01:00.0
+			parts := strings.SplitN(line, "=", 2)
+			if len(parts) == 2 {
+				return parts[1], nil
+			}
+		}
 	}
 
-	return pciAddress, nil
+	if err := scanner.Err(); err != nil {
+		return "", err
+	}
+
+	return "", fmt.Errorf("PCI_SLOT_NAME not found in uevent file")
 }
 
 // setVFVlan 设置VF的VLAN ID
@@ -293,6 +353,8 @@ func setVFVlan(parentIfName, vfName string, vlanID int) error {
 	if err := netlink.LinkSetVfVlan(parentLink, vfIndex, vlanID); err != nil {
 		return fmt.Errorf("failed to set VF VLAN: %v", err)
 	}
+
+	logger.Println(fmt.Sprintf("Set VF %s VLAN ID: %d", vfName, vlanID))
 
 	return nil
 }
